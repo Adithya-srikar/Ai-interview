@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>AI Interview MVP</title>
+</head>
+<body>
+  <!-- Step 1: Inputs -->
+  <div id="input-screen">
+    <h2>Enter Candidate Details</h2>
+    <label>Job Description:</label><br>
+    <textarea id="jd" rows="5" cols="50" placeholder="Paste job description here..."></textarea><br><br>
+
+    <label>Resume (scraped text):</label><br>
+    <textarea id="resume" rows="10" cols="50" placeholder="Paste resume text here..."></textarea><br><br>
+
+    <button onclick="startInterview()">Start Interview</button>
+  </div>
+
+  <!-- Step 2: Interview -->
+  <div id="interview-screen" style="display:none;">
+    <h2>Interview</h2>
+    <div id="question-box">
+      <p><b>Question:</b> <span id="question">Loading...</span></p>
+      <textarea id="answer" rows="5" cols="50" placeholder="Type your answer here..."></textarea><br><br>
+      <button onclick="submitAnswer()">Submit Answer</button>
+    </div>
+    <div id="interview-log"></div>
+    <button onclick="finishInterview()">Finish Interview</button>
+  </div>
+
+  <!-- Step 3: Summary -->
+  <div id="summary-screen" style="display:none;">
+    <h2>Interview Summary</h2>
+    <div id="summary"></div>
+    <button onclick="restart()">Restart</button>
+  </div>
+
+  <script>
+    let sessionId = null;
+
+    async function startInterview() {
+      const jdText = document.getElementById("jd").value;
+      const resumeText = document.getElementById("resume").value;
+
+      if (!jdText || !resumeText) {
+        alert("Please enter both JD and Resume.");
+        return;
+      }
+
+      try {
+        const res = await fetch("http://localhost:8000/api/init", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ jd: jdText, resume: resumeText })
+        });
+        const data = await res.json();
+        sessionId = data.session_id;
+
+        document.getElementById("input-screen").style.display = "none";
+        document.getElementById("interview-screen").style.display = "block";
+
+        loadQuestion();
+      } catch (err) {
+        alert("Error starting interview: " + err);
+      }
+    }
+
+    async function loadQuestion() {
+      try {
+        const res = await fetch(`http://localhost:8000/api/interview/next?session_id=${sessionId}`);
+        const data = await res.json();
+        document.getElementById("question").innerText = data.question || "No more questions.";
+      } catch (err) {
+        alert("Error fetching question: " + err);
+      }
+    }
+
+    async function submitAnswer() {
+      const answer = document.getElementById("answer").value;
+      if (!answer) {
+        alert("Please enter an answer.");
+        return;
+      }
+
+      try {
+        const res = await fetch("http://localhost:8000/api/interview/answer", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ session_id: sessionId, answer: answer })
+        });
+        const data = await res.json();
+
+        document.getElementById("interview-log").innerHTML += 
+          `<p><b>Q:</b> ${document.getElementById("question").innerText}<br><b>A:</b> ${answer}</p>`;
+        document.getElementById("answer").value = "";
+
+        if (data.finished) {
+          finishInterview();
+        } else {
+          loadQuestion();
+        }
+      } catch (err) {
+        alert("Error submitting answer: " + err);
+      }
+    }
+
+    async function finishInterview() {
+      try {
+        const res = await fetch(`http://localhost:8000/api/summary?session_id=${sessionId}`);
+        const data = await res.json();
+
+        document.getElementById("interview-screen").style.display = "none";
+        document.getElementById("summary-screen").style.display = "block";
+
+        document.getElementById("summary").innerHTML = `
+          <p><b>Job Description:</b><br>${data.jd}</p>
+          <p><b>Resume:</b><br>${data.resume}</p>
+          <h3>Interview Log:</h3>
+          ${data.interview_log.map(qa => `<p><b>Q:</b> ${qa.question}<br><b>A:</b> ${qa.answer}</p>`).join("")}
+          <h3>Summary:</h3><p>${data.summary}</p>
+          <h3>Status:</h3><p>${data.status}</p>
+        `;
+      } catch (err) {
+        alert("Error fetching summary: " + err);
+      }
+    }
+
+    function restart() {
+      sessionId = null;
+      document.getElementById("jd").value = "";
+      document.getElementById("resume").value = "";
+      document.getElementById("interview-log").innerHTML = "";
+      document.getElementById("summary").innerHTML = "";
+
+      document.getElementById("summary-screen").style.display = "none";
+      document.getElementById("input-screen").style.display = "block";
+    }
+  </script>
+</body>
+</html>

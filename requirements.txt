@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+pydantic
+python-dotenv
+langchain
+langchain-openai
+crewai>=0.51.0
+mem0ai
