@@ -3,6 +3,10 @@
 <head>
   <meta charset="UTF-8">
   <title>AI Interview MVP</title>
+  <style>
+    #video-box { margin-bottom: 1em; }
+    #video-controls button { margin-right: 0.5em; }
+  </style>
 </head>
 <body>
   <!-- Step 1: Inputs -->
@@ -14,16 +18,33 @@
     <label>Resume (scraped text):</label><br>
     <textarea id="resume" rows="10" cols="50" placeholder="Paste resume text here..."></textarea><br><br>
 
+    <label>LinkedIn URL (optional):</label><br>
+    <input id="linkedin" type="text" size="50" placeholder="Paste LinkedIn profile link..."><br><br>
+
+    <label>GitHub URL (optional):</label><br>
+    <input id="github" type="text" size="50" placeholder="Paste GitHub profile link..."><br><br>
+
     <button onclick="startInterview()">Start Interview</button>
   </div>
 
   <!-- Step 2: Interview -->
   <div id="interview-screen" style="display:none;">
     <h2>Interview</h2>
+    <div id="video-box">
+      <video id="webcam" width="320" height="240" autoplay muted playsinline></video><br>
+      <div id="video-controls">
+        <button onclick="startRecording()">Start Recording</button>
+        <button onclick="stopRecording()">Stop Recording</button>
+        <button onclick="uploadVideo()">Upload Video Answer</button>
+      </div>
+      <span id="recording-status"></span>
+    </div>
     <div id="question-box">
       <p><b>Question:</b> <span id="question">Loading...</span></p>
       <textarea id="answer" rows="5" cols="50" placeholder="Type your answer here..."></textarea><br><br>
       <button onclick="submitAnswer()">Submit Answer</button>
+      <button onclick="startSpeechRecording()">Record Speech Answer</button>
+      <input type="file" id="speech-file" accept="audio/*" style="display:none;" onchange="uploadSpeech()">
     </div>
     <div id="interview-log"></div>
     <button onclick="finishInterview()">Finish Interview</button>
@@ -38,10 +59,60 @@
 
   <script>
     let sessionId = null;
+    let mediaRecorder, recordedChunks = [], webcamStream = null;
+
+    // Webcam setup
+    async function setupWebcam() {
+      try {
+        webcamStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+        document.getElementById("webcam").srcObject = webcamStream;
+      } catch (err) {
+        document.getElementById("video-box").innerHTML = "<b>Webcam not available: " + err + "</b>";
+      }
+    }
+
+    function startRecording() {
+      if (!webcamStream) return;
+      recordedChunks = [];
+      mediaRecorder = new MediaRecorder(webcamStream, { mimeType: 'video/webm' });
+      mediaRecorder.ondataavailable = e => { if (e.data.size > 0) recordedChunks.push(e.data); };
+      mediaRecorder.onstop = () => {
+        document.getElementById("recording-status").innerText = "Recording stopped.";
+      };
+      mediaRecorder.start();
+      document.getElementById("recording-status").innerText = "Recording...";
+    }
+
+    function stopRecording() {
+      if (mediaRecorder && mediaRecorder.state !== "inactive") {
+        mediaRecorder.stop();
+      }
+    }
+
+    function uploadVideo() {
+      if (recordedChunks.length === 0) {
+        alert("No video recorded.");
+        return;
+      }
+      const blob = new Blob(recordedChunks, { type: 'video/webm' });
+      const formData = new FormData();
+      formData.append('file', blob, 'answer.webm');
+      formData.append('session_id', sessionId);
+      fetch('http://localhost:8000/api/interview/video', {
+        method: 'POST',
+        body: formData
+      }).then(res => res.json()).then(data => {
+        alert("Video uploaded.");
+      }).catch(err => {
+        alert("Error uploading video: " + err);
+      });
+    }
 
     async function startInterview() {
       const jdText = document.getElementById("jd").value;
       const resumeText = document.getElementById("resume").value;
+      const linkedin = document.getElementById("linkedin").value;
+      const github = document.getElementById("github").value;
 
       if (!jdText || !resumeText) {
         alert("Please enter both JD and Resume.");
@@ -52,14 +123,14 @@
         const res = await fetch("http://localhost:8000/api/init", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ jd: jdText, resume: resumeText })
+          body: JSON.stringify({ jd: jdText, resume: resumeText, linkedin, github })
         });
         const data = await res.json();
         sessionId = data.session_id;
 
         document.getElementById("input-screen").style.display = "none";
         document.getElementById("interview-screen").style.display = "block";
-
+        setupWebcam();
         loadQuestion();
       } catch (err) {
         alert("Error starting interview: " + err);
@@ -105,6 +176,32 @@
       }
     }
 
+    // Speech-to-text answer
+    function startSpeechRecording() {
+      document.getElementById("speech-file").click();
+    }
+    function uploadSpeech() {
+      const fileInput = document.getElementById("speech-file");
+      if (!fileInput.files[0]) return;
+      const formData = new FormData();
+      formData.append('file', fileInput.files[0]);
+      formData.append('session_id', sessionId);
+      fetch('http://localhost:8000/api/interview/speech?session_id=' + sessionId, {
+        method: 'POST',
+        body: formData
+      }).then(res => res.json()).then(data => {
+        document.getElementById("interview-log").innerHTML += 
+          `<p><b>Q:</b> ${document.getElementById("question").innerText}<br><b>A (speech):</b> ${data.answer_text}</p>`;
+        if (data.finished) {
+          finishInterview();
+        } else {
+          loadQuestion();
+        }
+      }).catch(err => {
+        alert("Error submitting speech answer: " + err);
+      });
+    }
+
     async function finishInterview() {
       try {
         const res = await fetch(`http://localhost:8000/api/summary?session_id=${sessionId}`);
@@ -130,11 +227,16 @@
       sessionId = null;
       document.getElementById("jd").value = "";
       document.getElementById("resume").value = "";
+      document.getElementById("linkedin").value = "";
+      document.getElementById("github").value = "";
       document.getElementById("interview-log").innerHTML = "";
       document.getElementById("summary").innerHTML = "";
-
       document.getElementById("summary-screen").style.display = "none";
       document.getElementById("input-screen").style.display = "block";
+      if (webcamStream) {
+        webcamStream.getTracks().forEach(track => track.stop());
+        document.getElementById("webcam").srcObject = null;
+      }
     }
   </script>
 </body>

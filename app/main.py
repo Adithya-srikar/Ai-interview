@@ -1,6 +1,6 @@
 # app/main.py
 import os, uuid, json
-from fastapi import FastAPI, Query,BackgroundTasks
+from fastapi import FastAPI, Query,BackgroundTasks, UploadFile, File
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from mem0 import MemoryClient
@@ -32,17 +32,48 @@ sessions: dict[str, dict] = {}
 class InitRequest(BaseModel):
     jd: str
     resume: str
+    linkedin: str = None
+    github: str = None
 
 class AnswerRequest(BaseModel):
     session_id: str
     answer: str
 
 @app.post("/api/init")
-async def init_interview(req: InitRequest,background_tasks: BackgroundTasks):
-    session_id = str(uuid.uuid4())
+async def init_interview(req: InitRequest, background_tasks: BackgroundTasks):
+    import aiohttp
+    from bs4 import BeautifulSoup
+    import datetime
 
+    session_id = str(uuid.uuid4())
     mem_client.add(messages=[{"role": "user", "content": f"JD: {req.jd}"}], user_id=session_id)
     mem_client.add(messages=[{"role": "user", "content": f"Resume: {req.resume}"}], user_id=session_id)
+
+    extra_info = ""
+    # Scrape LinkedIn
+    if req.linkedin:
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(req.linkedin) as resp:
+                    html = await resp.text()
+                    soup = BeautifulSoup(html, "html.parser")
+                    headline = soup.find("h1")
+                    extra_info += f"LinkedIn Headline: {headline.text if headline else 'N/A'}\n"
+        except Exception:
+            extra_info += "LinkedIn scrape failed.\n"
+    # Scrape GitHub
+    if req.github:
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(req.github) as resp:
+                    html = await resp.text()
+                    soup = BeautifulSoup(html, "html.parser")
+                    repo_count = soup.find("span", class_="Counter")
+                    extra_info += f"GitHub Repo Count: {repo_count.text if repo_count else 'N/A'}\n"
+        except Exception:
+            extra_info += "GitHub scrape failed.\n"
+    if extra_info:
+        mem_client.add(messages=[{"role": "user", "content": extra_info}], user_id=session_id)
 
     try:
         prescreen_notes = run_prescreen(req.jd, req.resume)
@@ -57,11 +88,12 @@ async def init_interview(req: InitRequest,background_tasks: BackgroundTasks):
             "Tell me about your most relevant project for this role.",
             "Which part of the JD best matches your skillset, and why?"
         ]
-
     mem_client.add(messages=[{"role": "assistant", "content": f"Initial Questions: {questions}"}], user_id=session_id)
     sessions[session_id] = {
         "current_q": 0,
-        "questions": questions
+        "questions": questions,
+        "start_time": datetime.datetime.utcnow().timestamp(),
+        "duration": 600,  # 10 min default
     }
     return {"session_id": session_id, "prescreen": prescreen_notes}
 
@@ -87,9 +119,15 @@ async def get_next_question(session_id: str = Query(...)):
 
 @app.post("/api/interview/answer")
 async def submit_answer(req: AnswerRequest):
+    import datetime
     session = sessions.get(req.session_id)
     if not session:
         return {"error": "Invalid session_id"}
+
+    # Interview timing check
+    now = datetime.datetime.utcnow().timestamp()
+    if now - session["start_time"] > session["duration"]:
+        return {"finished": True, "evaluation": None, "reason": "Interview time exceeded."}
 
     if session["current_q"] < len(session["questions"]):
         q = session["questions"][session["current_q"]]
@@ -110,6 +148,9 @@ async def submit_answer(req: AnswerRequest):
         session["current_q"] += 1
 
     finished = session["current_q"] >= len(session["questions"])
+    # Also finish if time exceeded
+    if now - session["start_time"] > session["duration"]:
+        finished = True
     return {"finished": finished, "evaluation": eval_json}
 
 @app.get("/api/summary")
@@ -163,5 +204,47 @@ async def get_summary(session_id: str = Query(...)):
         "overall_score": lc_summary.get("overall_score", 60),
         "hr_report": report_text
     }
+
+# Speech-to-text endpoint
+@app.post("/api/interview/speech")
+async def speech_to_text(session_id: str = Query(...), file: UploadFile = File(...)):
+    import tempfile
+    import datetime
+    try:
+        import whisper
+    except ImportError:
+        return {"error": "Whisper not installed."}
+    session = sessions.get(session_id)
+    if not session:
+        return {"error": "Invalid session_id"}
+    now = datetime.datetime.utcnow().timestamp()
+    if now - session["start_time"] > session["duration"]:
+        return {"finished": True, "reason": "Interview time exceeded."}
+    # Save audio file
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
+        tmp.write(await file.read())
+        tmp_path = tmp.name
+    # Transcribe
+    model = whisper.load_model("base")
+    result = model.transcribe(tmp_path)
+    answer_text = result.get("text", "")
+    # Use same logic as submit_answer
+    if session["current_q"] < len(session["questions"]):
+        q = session["questions"][session["current_q"]]
+    else:
+        q = session["questions"][-1]
+    mem_client.add(messages=[{"role": "assistant", "content": f"Q: {q}"}], user_id=session_id)
+    mem_client.add(messages=[{"role": "user", "content": f"A: {answer_text}"}], user_id=session_id)
+    try:
+        eval_json = evaluate_answer(q, answer_text)
+        mem_client.add(messages=[{"role": "assistant", "content": f"Evaluation: {json.dumps(eval_json)}"}], user_id=session_id)
+    except Exception:
+        eval_json = {"relevance": 5, "clarity": 5, "technical": 5, "red_flags": [], "note": "eval skipped"}
+    if session["current_q"] < len(session["questions"]):
+        session["current_q"] += 1
+    finished = session["current_q"] >= len(session["questions"])
+    if now - session["start_time"] > session["duration"]:
+        finished = True
+    return {"finished": finished, "evaluation": eval_json, "answer_text": answer_text}
 
 

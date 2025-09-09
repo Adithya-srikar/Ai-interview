@@ -1,8 +1,15 @@
-fastapi
-uvicorn[standard]
 pydantic
 python-dotenv
-langchain
 langchain-openai
-crewai>=0.51.0
 mem0ai
+fastapi
+uvicorn
+langchain
+crewai
+openai-whisper
+aiohttp
+beautifulsoup4
+SpeechRecognition
+python-multipart
+requests
+# Existing requirements
